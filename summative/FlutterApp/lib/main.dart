@@ -1,4 +1,5 @@
 import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
@@ -31,12 +32,10 @@ class PredictionPage extends StatefulWidget {
 }
 
 class _PredictionPageState extends State<PredictionPage> {
-  // ---------------------------------------------------------------------
-  // IMPORTANT: point this at your deployed API before recording your demo.
-  // For local testing on the iOS Simulator, 127.0.0.1 reaches your Mac's
-  // localhost directly (no special IP needed, unlike the Android emulator).
-  // ---------------------------------------------------------------------
-static const String apiBaseUrl = "https://maize-yield-api-3626.onrender.com";
+  static const String _apiBaseUrl =
+      "https://maize-yield-api-3626.onrender.com";
+  static const Duration _requestTimeout = Duration(seconds: 20);
+
   final _formKey = GlobalKey<FormState>();
 
   final _regionController = TextEditingController();
@@ -49,8 +48,8 @@ static const String apiBaseUrl = "https://maize-yield-api-3626.onrender.com";
   final _daysToHarvestController = TextEditingController();
 
   bool _isLoading = false;
-  String? _resultText;
   bool _resultIsError = false;
+  String? _resultText;
 
   @override
   void dispose() {
@@ -66,16 +65,45 @@ static const String apiBaseUrl = "https://maize-yield-api-3626.onrender.com";
   }
 
   bool? _parseBool(String raw) {
-    final v = raw.trim().toLowerCase();
-    if (v == 'true' || v == 'yes' || v == '1') return true;
-    if (v == 'false' || v == 'no' || v == '0') return false;
+    final value = raw.trim().toLowerCase();
+    if (value == 'true' || value == 'yes' || value == '1') return true;
+    if (value == 'false' || value == 'no' || value == '0') return false;
     return null;
   }
 
-  Future<void> _submitPrediction() async {
-    if (!_formKey.currentState!.validate()) {
-      return;
+  String _buildRequestBody() {
+    return jsonEncode({
+      "Region": _regionController.text.trim(),
+      "Soil_Type": _soilTypeController.text.trim(),
+      "Rainfall_mm": double.tryParse(_rainfallController.text.trim()),
+      "Temperature_Celsius":
+          double.tryParse(_temperatureController.text.trim()),
+      "Fertilizer_Used": _parseBool(_fertilizerController.text),
+      "Irrigation_Used": _parseBool(_irrigationController.text),
+      "Weather_Condition": _weatherController.text.trim(),
+      "Days_to_Harvest": int.tryParse(_daysToHarvestController.text.trim()),
+    });
+  }
+
+  String _extractErrorMessage(dynamic decoded, int statusCode) {
+    final detail = decoded["detail"];
+    if (detail is List) {
+      return detail
+          .map((e) => "${(e["loc"] as List).last}: ${e["msg"]}")
+          .join("\n");
     }
+    return detail?.toString() ?? "Request failed ($statusCode).";
+  }
+
+  void _showResult(String text, {required bool isError}) {
+    setState(() {
+      _resultText = text;
+      _resultIsError = isError;
+    });
+  }
+
+  Future<void> _submitPrediction() async {
+    if (!_formKey.currentState!.validate()) return;
 
     setState(() {
       _isLoading = true;
@@ -83,58 +111,29 @@ static const String apiBaseUrl = "https://maize-yield-api-3626.onrender.com";
       _resultIsError = false;
     });
 
-    final fertilizerBool = _parseBool(_fertilizerController.text);
-    final irrigationBool = _parseBool(_irrigationController.text);
-
-    final body = jsonEncode({
-      "Region": _regionController.text.trim(),
-      "Soil_Type": _soilTypeController.text.trim(),
-      "Rainfall_mm": double.tryParse(_rainfallController.text.trim()),
-      "Temperature_Celsius": double.tryParse(_temperatureController.text.trim()),
-      "Fertilizer_Used": fertilizerBool,
-      "Irrigation_Used": irrigationBool,
-      "Weather_Condition": _weatherController.text.trim(),
-      "Days_to_Harvest": int.tryParse(_daysToHarvestController.text.trim()),
-    });
-
     try {
       final response = await http
           .post(
-            Uri.parse("$apiBaseUrl/predict"),
+            Uri.parse("$_apiBaseUrl/predict"),
             headers: {"Content-Type": "application/json"},
-            body: body,
+            body: _buildRequestBody(),
           )
-          .timeout(const Duration(seconds: 20));
+          .timeout(_requestTimeout);
 
       final decoded = jsonDecode(response.body);
 
       if (response.statusCode == 200) {
         final yieldValue = decoded["predicted_yield_tons_per_hectare"];
-        setState(() {
-          _resultText = "Predicted maize yield: $yieldValue tons/hectare";
-          _resultIsError = false;
-        });
+        _showResult(
+          "Predicted maize yield: $yieldValue tons/hectare",
+          isError: false,
+        );
       } else {
-        // FastAPI validation errors come back as a list under "detail"
-        String message;
-        final detail = decoded["detail"];
-        if (detail is List) {
-          message = detail
-              .map((e) => "${(e["loc"] as List).last}: ${e["msg"]}")
-              .join("\n");
-        } else {
-          message = detail?.toString() ?? "Request failed (${response.statusCode}).";
-        }
-        setState(() {
-          _resultText = "Error:\n$message";
-          _resultIsError = true;
-        });
+        final message = _extractErrorMessage(decoded, response.statusCode);
+        _showResult("Error:\n$message", isError: true);
       }
     } catch (e) {
-      setState(() {
-        _resultText = "Error: could not reach the API.\n$e";
-        _resultIsError = true;
-      });
+      _showResult("Error: could not reach the API.\n$e", isError: true);
     } finally {
       setState(() {
         _isLoading = false;
@@ -168,6 +167,96 @@ static const String apiBaseUrl = "https://maize-yield-api-3626.onrender.com";
     );
   }
 
+  Widget _buildFormFields() {
+    return Column(
+      children: [
+        _buildTextField(
+          controller: _regionController,
+          label: "Region",
+          hint: "North / East / South / West",
+        ),
+        _buildTextField(
+          controller: _soilTypeController,
+          label: "Soil Type",
+          hint: "Clay / Sandy / Loam / Silt / Peaty / Chalky",
+        ),
+        _buildTextField(
+          controller: _rainfallController,
+          label: "Rainfall (mm)",
+          hint: "e.g. 650",
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+        ),
+        _buildTextField(
+          controller: _temperatureController,
+          label: "Temperature (Celsius)",
+          hint: "e.g. 23.5",
+          keyboardType: const TextInputType.numberWithOptions(
+            decimal: true,
+            signed: true,
+          ),
+        ),
+        _buildTextField(
+          controller: _fertilizerController,
+          label: "Fertilizer Used",
+          hint: "true / false",
+        ),
+        _buildTextField(
+          controller: _irrigationController,
+          label: "Irrigation Used",
+          hint: "true / false",
+        ),
+        _buildTextField(
+          controller: _weatherController,
+          label: "Weather Condition",
+          hint: "Sunny / Rainy / Cloudy",
+        ),
+        _buildTextField(
+          controller: _daysToHarvestController,
+          label: "Days to Harvest",
+          hint: "e.g. 104",
+          keyboardType: TextInputType.number,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildPredictButton() {
+    return ElevatedButton(
+      onPressed: _isLoading ? null : _submitPrediction,
+      style: ElevatedButton.styleFrom(
+        padding: const EdgeInsets.symmetric(vertical: 14),
+      ),
+      child: _isLoading
+          ? const SizedBox(
+              height: 20,
+              width: 20,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : const Text("Predict", style: TextStyle(fontSize: 16)),
+    );
+  }
+
+  Widget _buildResultCard() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: _resultIsError ? Colors.red.shade50 : Colors.green.shade50,
+        border: Border.all(
+          color: _resultIsError ? Colors.red : Colors.green,
+        ),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(
+        _resultText!,
+        style: TextStyle(
+          color: _resultIsError ? Colors.red.shade900 : Colors.green.shade900,
+          fontWeight: FontWeight.w500,
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -188,90 +277,11 @@ static const String apiBaseUrl = "https://maize-yield-api-3626.onrender.com";
                   style: TextStyle(fontSize: 14, color: Colors.black54),
                 ),
                 const SizedBox(height: 12),
-                _buildTextField(
-                  controller: _regionController,
-                  label: "Region",
-                  hint: "North / East / South / West",
-                ),
-                _buildTextField(
-                  controller: _soilTypeController,
-                  label: "Soil Type",
-                  hint: "Clay / Sandy / Loam / Silt / Peaty / Chalky",
-                ),
-                _buildTextField(
-                  controller: _rainfallController,
-                  label: "Rainfall (mm)",
-                  hint: "e.g. 650",
-                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                ),
-                _buildTextField(
-                  controller: _temperatureController,
-                  label: "Temperature (Celsius)",
-                  hint: "e.g. 23.5",
-                  keyboardType: const TextInputType.numberWithOptions(
-                    decimal: true,
-                    signed: true,
-                  ),
-                ),
-                _buildTextField(
-                  controller: _fertilizerController,
-                  label: "Fertilizer Used",
-                  hint: "true / false",
-                ),
-                _buildTextField(
-                  controller: _irrigationController,
-                  label: "Irrigation Used",
-                  hint: "true / false",
-                ),
-                _buildTextField(
-                  controller: _weatherController,
-                  label: "Weather Condition",
-                  hint: "Sunny / Rainy / Cloudy",
-                ),
-                _buildTextField(
-                  controller: _daysToHarvestController,
-                  label: "Days to Harvest",
-                  hint: "e.g. 104",
-                  keyboardType: TextInputType.number,
-                ),
+                _buildFormFields(),
                 const SizedBox(height: 20),
-                ElevatedButton(
-                  onPressed: _isLoading ? null : _submitPrediction,
-                  style: ElevatedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                  ),
-                  child: _isLoading
-                      ? const SizedBox(
-                          height: 20,
-                          width: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Text("Predict", style: TextStyle(fontSize: 16)),
-                ),
+                _buildPredictButton(),
                 const SizedBox(height: 20),
-                if (_resultText != null)
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: _resultIsError
-                          ? Colors.red.shade50
-                          : Colors.green.shade50,
-                      border: Border.all(
-                        color: _resultIsError ? Colors.red : Colors.green,
-                      ),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Text(
-                      _resultText!,
-                      style: TextStyle(
-                        color: _resultIsError
-                            ? Colors.red.shade900
-                            : Colors.green.shade900,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                  ),
+                if (_resultText != null) _buildResultCard(),
               ],
             ),
           ),
